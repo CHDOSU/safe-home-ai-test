@@ -13,7 +13,22 @@ from datetime import date
 # ---------------- 가상 매물 ----------------
 TYPES = ["원룸", "분리형 원룸", "투룸", "오피스텔"]
 OPTS = ["에어컨", "세탁기", "냉장고", "엘리베이터", "주차", "반려동물"]
-PRIS = ["가격", "거리", "넓이", "조용함", "채광"]
+PRIS = ["가격", "거리", "관리비", "넓이", "채광", "옵션", "조용함"]
+
+# 기본 가중치: 11/10 회의록 구글폼 설문 Q2 "자취방을 구할 때 중요하게 생각하는 조건"(복수 선택, 103명)
+# 선택 수를 그대로 비율로 바꿈. 데이터가 없는 '주변 편의시설 및 안전'(33명)은 아직 제외,
+# '조용함'은 설문 항목에 없어 사용자가 직접 고를 때만 반영.
+SURVEY_N = 103
+SURVEY_VOTES = {
+    "가격": 58,    # 보증금 및 월세
+    "거리": 48,    # 학교와의 거리
+    "관리비": 38,  # 관리비
+    "넓이": 35,    # 방 크기 및 구조
+    "채광": 29,    # 건물 상태 및 채광
+    "옵션": 26,    # 가전제품 등 옵션
+}
+_TOTAL = sum(SURVEY_VOTES.values())
+DEFAULT_WEIGHTS = {k: round(v / _TOTAL, 3) for k, v in SURVEY_VOTES.items()}
 BASE = {"원룸": 36, "분리형 원룸": 42, "투룸": 55, "오피스텔": 45}
 DONG_K = {"개신동": 1.0, "사창동": 1.03, "성화동": 0.95, "모충동": 0.9}
 
@@ -83,7 +98,8 @@ def parse_query(t: str) -> tuple[dict, list[str]]:
     op = [k for k, p in syn.items() if re.search(p, t) and not re.search(f"({p})[^,.]{{0,6}}(없어도|상관없)", t)]
     if op:
         c["options"] = op; say.append("필수 옵션: " + ", ".join(op))
-    pw = {"조용함": r"조용|소음", "가격": r"싼|저렴|가성비", "거리": r"가까운|근처", "넓이": r"넓은|큰 방", "채광": r"햇빛|채광|밝은|남향"}
+    pw = {"조용함": r"조용|소음", "가격": r"싼|저렴|가성비", "거리": r"가까운|근처", "넓이": r"넓은|큰 방",
+          "채광": r"햇빛|채광|밝은|남향", "관리비": r"관리비", "옵션": r"풀옵션|옵션 많"}
     found = sorted((m.start(), k) for k, p in pw.items() if (m := re.search(p, t)))
     if found:
         c["priorities"] = [k for _, k in found][:3]; say.append("우선순위: " + " > ".join(c["priorities"]))
@@ -94,6 +110,19 @@ def parse_query(t: str) -> tuple[dict, list[str]]:
 def roc_weights(n: int) -> list[float]:
     """순위 중심 가중치(Rank Order Centroid): k순위 = (1/n)·Σ_{i=k..n} 1/i"""
     return [round(sum(1 / i for i in range(k, n + 1)) / n, 3) for k in range(1, n + 1)]
+
+
+def blend_weights(priorities: list[str], user_share: float = 0.5) -> dict:
+    """우선순위를 안 고르면 설문 기본값 그대로.
+    고르면 설문 기본값 50% + 고른 순서의 ROC 50%로 섞어서, 고른 항목은 확실히 올라가고
+    가격·거리처럼 대부분이 중요하게 본 항목도 0이 되지 않게 해요. 합계는 1."""
+    if not priorities:
+        return dict(DEFAULT_WEIGHTS)
+    roc = dict(zip(priorities, roc_weights(len(priorities))))
+    keys = list(DEFAULT_WEIGHTS) + [k for k in priorities if k not in DEFAULT_WEIGHTS]
+    w = {k: (1 - user_share) * DEFAULT_WEIGHTS.get(k, 0) + user_share * roc.get(k, 0) for k in keys}
+    s = sum(w.values())
+    return {k: round(v / s, 3) for k, v in sorted(w.items(), key=lambda x: -x[1])}
 
 
 def passes(p: dict, c: dict) -> bool:
@@ -107,11 +136,13 @@ def _norm(pool: list[dict]) -> dict:
         vs = [p[key] for p in pool]
         lo, hi = min(vs), max(vs)
         return lo, (hi - lo) or 1
-    (r0, rs), (w0, ws), (a0, as_) = rng("월세"), rng("도보"), rng("면적")
+    (r0, rs), (w0, ws), (a0, as_), (m0, ms) = rng("월세"), rng("도보"), rng("면적"), rng("관리비")
     return {
         "가격": lambda p: 1 - (p["월세"] - r0) / rs,
         "거리": lambda p: 1 - (p["도보"] - w0) / ws,
+        "관리비": lambda p: 1 - (p["관리비"] - m0) / ms,
         "넓이": lambda p: (p["면적"] - a0) / as_,
+        "옵션": lambda p: len(p["옵션"]) / len(OPTS),
         "조용함": lambda p: p["조용함"] / 5,
         "채광": lambda p: p["채광"] / 5,
     }
@@ -129,12 +160,14 @@ def recommend(listings: list[dict], c: dict, limit: int = 3) -> dict:
             need = rents[min(2, len(rents) - 1)]
             sug.append(f"월세 상한을 {need}만 원으로 올리면 {sum(r <= need for r in rents)}개를 볼 수 있어요.")
         return {"total": 0, "items": [], "suggestions": sug}
-    pris = c.get("priorities") or ["가격", "거리"]
-    w = roc_weights(len(pris))
+    weights = blend_weights(c.get("priorities") or [])
+    pris = list(weights)
+    basis = (f"설문 기본값(응답 {SURVEY_N}명) 50% + 내가 고른 순서(ROC) 50%" if c.get("priorities")
+             else f"설문 기본값(응답 {SURVEY_N}명)")
     f = _norm(pool)
     scored = []
     for p in pool:
-        parts = {k: round(w[i] * f[k](p), 3) for i, k in enumerate(pris)}
+        parts = {k: round(weights[k] * f[k](p), 3) for k in pris}
         scored.append((sum(parts.values()), p, parts))
     scored.sort(key=lambda x: -x[0])
     top = scored[:limit]
@@ -143,7 +176,7 @@ def recommend(listings: list[dict], c: dict, limit: int = 3) -> dict:
     for rank, (s, p, parts) in enumerate(top, 1):
         why, bad = explain(p, pris, tops)
         items.append({"rank": rank, "score": round(s, 3), "parts": parts, "p": p, "why": why, "bad": bad})
-    return {"total": len(pool), "items": items, "weights": dict(zip(pris, w)), "suggestions": []}
+    return {"total": len(pool), "items": items, "weights": weights, "basis": basis, "suggestions": []}
 
 
 def explain(p: dict, pris: list[str], tops: list[dict]) -> tuple[list[str], list[str]]:
@@ -159,6 +192,10 @@ def explain(p: dict, pris: list[str], tops: list[dict]) -> tuple[list[str], list
             why.append(f"햇빛이 잘 들어요 (채광 {p['채광']}/5).")
         if k == "넓이" and p["면적"] >= 24:
             why.append(f"전용 {p['면적']}㎡로 넓은 편이에요.")
+        if k == "관리비" and p["관리비"] <= 4:
+            why.append(f"관리비가 {p['관리비']}만 원으로 낮은 편이에요.")
+        if k == "옵션" and len(p["옵션"]) >= 5:
+            why.append(f"옵션이 많아요 ({'·'.join(p['옵션'])}).")
     if not why:
         why.append(f"월세 {p['월세']}만 원, 도보 {p['도보']}분으로 조건에 맞아요.")
     if p["층"] >= 3 and "엘리베이터" not in p["옵션"]:

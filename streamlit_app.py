@@ -68,8 +68,17 @@ with tab1:
         max_walk = st.slider("정문까지 도보 최대 (분)", 3, 30, parsed.get("max_walk", 15))
         types = st.multiselect("주택 유형", logic.TYPES, parsed.get("types", ["원룸", "분리형 원룸", "오피스텔"]))
         opts = st.multiselect("꼭 있어야 하는 옵션", logic.OPTS, parsed.get("options", []))
-        pris = st.multiselect("중요하게 보는 것 (고른 순서 = 중요도 순, 최대 3개)", logic.PRIS,
-                              parsed.get("priorities", ["가격"]), max_selections=3)
+        pris = st.multiselect("특히 중요하게 보는 것 (고른 순서 = 중요도 순, 최대 3개 · 비우면 설문 기본값)",
+                              logic.PRIS, parsed.get("priorities", []), max_selections=3)
+        with st.expander("기본 가중치는 어떻게 정했나요?"):
+            st.write(f"팀 설문(응답 {logic.SURVEY_N}명)의 '자취방을 구할 때 중요하게 생각하는 조건'(복수 선택)에서 "
+                     "각 항목을 고른 사람 수를 비율로 바꿨어요. 위에서 항목을 고르면 설문 기본값 50%와 "
+                     "내가 고른 순서 50%를 섞어요.")
+            st.dataframe(pd.DataFrame([{"항목": k, "선택 수": logic.SURVEY_VOTES[k],
+                                        "선택 비율": f"{logic.SURVEY_VOTES[k] / logic.SURVEY_N:.0%}",
+                                        "기본 가중치": v} for k, v in logic.DEFAULT_WEIGHTS.items()]),
+                         hide_index=True, use_container_width=True)
+            st.caption("'주변 편의시설 및 안전'(33명)은 매물 데이터가 생기면 추가, '조용함'은 설문에 없어 직접 고를 때만 반영해요.")
 
     cond = {"max_rent": max_rent, "max_deposit": max_dep, "max_walk": max_walk, "types": types,
             "options": opts, "priorities": pris}
@@ -82,7 +91,7 @@ with tab1:
                 st.write("· " + s)
         else:
             w = ", ".join(f"{k} {v:.2f}" for k, v in res["weights"].items())
-            st.caption(f"조건을 모두 만족하는 가상 매물 {res['total']}개 중 상위 {len(res['items'])}개 · 가중치(ROC): {w}")
+            st.caption(f"조건을 모두 만족하는 가상 매물 {res['total']}개 중 상위 {len(res['items'])}개 · 가중치({res['basis']}): {w}")
             for it in res["items"]:
                 p = it["p"]
                 m = logic.compare(p, LIVE.get("OFFI" if p["유형"] == "오피스텔" else "SH", {}).get("by_dong"))
@@ -100,7 +109,7 @@ with tab1:
                     if it["bad"]:
                         st.caption("아쉬운 점 · " + " ".join(it["bad"]))
                     with st.expander("왜 이 순서인가요? (점수 내역)"):
-                        st.write("필수 조건은 규칙으로 거르고, 남은 방을 0~1로 바꾼 값 × ROC 가중치로 정렬했어요. AI는 순서를 바꾸지 않아요.")
+                        st.write("필수 조건은 규칙으로 거르고, 남은 방을 0~1로 바꾼 값 × 가중치(설문 기본값, 고른 항목이 있으면 ROC와 반반)로 정렬했어요. AI는 순서를 바꾸지 않아요.")
                         st.dataframe(pd.DataFrame([{"항목": k, "가중치 반영 점수": v} for k, v in it["parts"].items()]),
                                      hide_index=True, use_container_width=True)
                         st.write(f"합계 {it['score']}")

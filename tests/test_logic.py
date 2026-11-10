@@ -19,6 +19,19 @@ class T(unittest.TestCase):
         self.assertEqual(logic.roc_weights(2), [0.75, 0.25])
         self.assertEqual(logic.roc_weights(3), [0.611, 0.278, 0.111])
 
+    def test_survey_default_weights(self):
+        w = logic.DEFAULT_WEIGHTS
+        self.assertAlmostEqual(sum(w.values()), 1, places=2)
+        self.assertEqual(max(w, key=w.get), "가격")          # 58명으로 1위
+        self.assertGreater(w["거리"], w["관리비"])            # 48 > 38
+        self.assertEqual(logic.blend_weights([]), w)          # 안 고르면 설문값 그대로
+        b = logic.blend_weights(["조용함", "가격"])
+        self.assertAlmostEqual(sum(b.values()), 1, places=2)
+        self.assertGreater(b["조용함"], w["거리"])            # 고른 1순위는 확실히 올라감
+        self.assertGreater(b["거리"], 0)                     # 안 고른 항목도 0은 아님
+        r = logic.recommend(L, {"max_rent": 45, "max_walk": 15})
+        self.assertIn("설문", r["basis"]); self.assertEqual(set(r["weights"]), set(w))
+
     def test_recommend_constraints(self):
         c = {"max_rent": 40, "max_deposit": 500, "max_walk": 10, "types": [], "options": ["세탁기"], "priorities": ["조용함", "가격"]}
         r = logic.recommend(L, c, 20)
